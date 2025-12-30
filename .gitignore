@@ -1,0 +1,63 @@
+# =========================
+# Python virtual environment
+# =========================
+.venv/
+
+# =========================
+# Data (C-MAPSS and any other datasets)
+# =========================
+data/raw/**
+data/interim/**
+data/processed/**
+
+# If you want to keep folder placeholders in git:
+!data/raw/.gitkeep
+!data/interim/.gitkeep
+!data/processed/.gitkeep
+
+# Also ignore dataset archives
+*.zip
+
+# =========================
+# Reports / generated artifacts
+# =========================
+reports/figures/**
+# (optional) keep the folder itself
+!reports/figures/.gitkeep
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# =========================
+# Python cache / build
+# =========================
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# =========================
+# IDE / OS
+# =========================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# =========================
+# Logs / temp
+# =========================
+*.log
+*.tmp
+*.bak
