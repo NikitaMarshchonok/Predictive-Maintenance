@@ -1,5 +1,5 @@
 {
-  "fd": "FD001",
+  "fd": "FD003",
   "model": "RandomForestRegressor",
   "window": 30,
   "rul_cap": 125,
@@ -12,7 +12,7 @@
     "s5"
   ],
   "n_features": 45,
-  "n_train_rows": 17731,
+  "n_train_rows": 21820,
   "n_train_units": 100,
   "val_units": [
     3,
@@ -38,16 +38,16 @@
   ],
   "metrics": {
     "val": {
-      "mae_cap": 9.37882869804401,
-      "rmse_cap": 12.736577577341325
+      "mae_cap": 7.811269675356615,
+      "rmse_cap": 11.27244885395208
     },
     "test_lastcycle": {
-      "mae_cap": 8.844925,
-      "rmse_cap": 11.71752014879855,
-      "nasa_cap": 209.03237877293122,
-      "mae_raw": 9.914925,
-      "rmse_raw": 13.175766711561797,
-      "nasa_raw": 244.2824457487237
+      "mae_cap": 8.9719,
+      "rmse_cap": 12.642654245647945,
+      "nasa_cap": 359.9355998236686,
+      "mae_raw": 10.531899999999998,
+      "rmse_raw": 14.346766408323516,
+      "nasa_raw": 403.2202961382674
     }
   },
   "sklearn_version": "1.7.2"
