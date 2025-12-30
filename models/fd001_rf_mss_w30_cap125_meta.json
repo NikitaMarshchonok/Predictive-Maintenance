@@ -1,0 +1,13 @@
+{
+  "dataset": "C-MAPSS FD001",
+  "model": "RandomForestRegressor",
+  "features": "mean/std/slope rolling",
+  "window": 30,
+  "rul_cap": 125,
+  "metrics_test_last_cycle": {
+    "mae_cap": 12.536,
+    "rmse_cap": 16.416,
+    "mae_raw": 13.606,
+    "rmse_raw": 17.691
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "dataset": "FD001",
+  "split": "TEST_last_cycle",
+  "window": 30,
+  "rul_cap": 125,
+  "mae_cap": 13.036241502164502,
+  "rmse_cap": 17.10566577312899,
+  "mae_raw": 14.106241502164503,
+  "rmse_raw": 18.22385995700342,
+  "model_path": "/Users/nikitamarshchonok/Desktop/Predictive Maintenance/models/fd001_rf_mss_w30_cap125.joblib"
+}
