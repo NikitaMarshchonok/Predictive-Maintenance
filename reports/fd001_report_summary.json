@@ -1,0 +1,12 @@
+{
+  "dataset": "FD001",
+  "window": 30,
+  "rul_cap": 125,
+  "mae_cap": 13.036241502164506,
+  "rmse_cap": 17.10566577312899,
+  "mae_raw": 14.106241502164504,
+  "rmse_raw": 18.223859957003423,
+  "nasa_score_cap": 659.0522315440039,
+  "pred_csv": "reports/fd001_test_lastcycle_preds_w30_cap125.csv",
+  "metrics_json": "reports/fd001_test_metrics_w30_cap125.json"
+}
