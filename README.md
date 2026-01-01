@@ -32,9 +32,7 @@ Predictive Maintenance/
 ![TEST MAE](reports/figures/cmapss_test_mae_cap_w30_cap125.png)
 
 ## How to run
-
 ### 1) Create venv & install
-
 ```bash
 python -m venv .venv
 source .venv/bin/activate
@@ -42,9 +40,7 @@ pip install -r requirements.txt
 ```
 
 ### 2) Put CMAPSS data
-
 Place files under:
-
 ```text
 data/raw/cmapss/CMAPSSData/
   train_FD001.txt ... train_FD004.txt
@@ -52,10 +48,15 @@ data/raw/cmapss/CMAPSSData/
   RUL_FD001.txt   ... RUL_FD004.txt
 ```
 
-### 3) Predict (example)
-
+### 3) Train all models (FD001–FD004)
 ```bash
-python -m src.predict --data data/raw/cmapss/CMAPSSData/test_FD001.txt --unit-id 1
+python -m src.train_all --window 30 --cap 125
 ```
 
-> Note: current CLI uses FD001 model by default (we can extend it to auto-pick FD002/3/4 next).
+### 4) Predict (last-cycle RUL)
+```bash
+python -m src.predict --fd FD001 --unit-id 1
+python -m src.predict --fd FD004 --unit-id 1
+python -m src.predict --fd FD002 --out reports/preds_fd002.csv
+```
+
