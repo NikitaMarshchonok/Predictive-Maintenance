@@ -61,3 +61,12 @@ Thumbs.db
 *.log
 *.tmp
 *.bak
+
+
+# Outputs
+reports/
+*.joblib
+
+# Data
+data/raw/
+data/processed/
