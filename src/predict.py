@@ -6,6 +6,33 @@ import numpy as np
 import pandas as pd
 import joblib
 
+def rf_prediction_interval(model, X, low=10, high=90):
+    """
+    Prediction interval for RandomForest via per-tree predictions.
+    Returns (p_low, p50, p_high) for each row in X.
+    """
+    if not hasattr(model, "estimators_"):
+        return None, None, None
+
+    # shape: (n_samples, n_estimators)
+    preds = np.column_stack([est.predict(X) for est in model.estimators_])
+
+    p_low = np.percentile(preds, low, axis=1)
+    p50   = np.percentile(preds, 50, axis=1)
+    p_high= np.percentile(preds, high, axis=1)
+    return p_low, p50, p_high
+
+
+def rul_status(rul_cap_value, red_thr=20.0, yellow_thr=50.0):
+    """
+    Simple traffic-light status based on capped RUL.
+    """
+    if rul_cap_value <= red_thr:
+        return "RED"
+    if rul_cap_value <= yellow_thr:
+        return "YELLOW"
+    return "GREEN"
+
 
 def read_cmapss_txt(path: Path) -> pd.DataFrame:
     """
