@@ -7,6 +7,23 @@ import pandas as pd
 import joblib
 
 
+# -----------------------------
+# Helpers
+# -----------------------------
+def _pct_col_label(p: float) -> str:
+    """
+    Convert percentile value to a safe column suffix.
+    Examples:
+      10.0 -> "10"
+      5.0  -> "5"
+      12.5 -> "12_5"
+    """
+    p = float(p)
+    if p.is_integer():
+        return str(int(p))
+    return str(p).replace(".", "_")
+
+
 def rf_prediction_interval(model, X, low=10, high=90):
     """
     Prediction interval for RandomForest via per-tree predictions.
@@ -102,6 +119,7 @@ def make_features_last_cycle(df: pd.DataFrame, feature_cols: list[str], window: 
 
     feat_df = pd.DataFrame(rows)
 
+    # ensure all expected feature columns exist
     for c in feature_cols:
         if c not in feat_df.columns:
             feat_df[c] = 0.0
@@ -114,6 +132,9 @@ def build_tag(fd: str, window: int, cap: int) -> str:
     return f"{fd.lower()}_rf_mss_w{window}_cap{cap}"
 
 
+# -----------------------------
+# Main
+# -----------------------------
 def main():
     parser = argparse.ArgumentParser(description="C-MAPSS RUL prediction (last-cycle) using saved model.")
     parser.add_argument("--fd", type=str, default="FD001", help="FD001/FD002/FD003/FD004")
@@ -127,7 +148,6 @@ def main():
         help="Path to test_FD00X.txt. If omitted, auto path is used.",
     )
     parser.add_argument("--models-dir", type=str, default="models", help="Models directory (default: models/)")
-
     parser.add_argument("--unit-id", type=int, default=None, help="If set, predict only this unit_id")
     parser.add_argument("--out", type=str, default=None, help="Optional CSV output path for predictions (all units)")
 
@@ -137,14 +157,18 @@ def main():
     parser.add_argument("--red-thr", type=float, default=20.0, help="RED threshold for CAP RUL")
     parser.add_argument("--yellow-thr", type=float, default=50.0, help="YELLOW threshold for CAP RUL")
 
+    # reporting
+    parser.add_argument("--topk", type=int, default=10, help="Top-K critical units to print (batch mode only)")
+
     args = parser.parse_args()
 
     fd = args.fd.upper()
     if fd not in {"FD001", "FD002", "FD003", "FD004"}:
         raise ValueError("fd must be one of: FD001, FD002, FD003, FD004")
-
     if args.pi_high <= args.pi_low:
         raise ValueError("--pi-high must be greater than --pi-low (e.g., 90 > 10)")
+    if args.topk < 1:
+        raise ValueError("--topk must be >= 1")
 
     root = Path(__file__).resolve().parents[1]
     data_dir = root / "data" / "raw" / "cmapss" / "CMAPSSData"
@@ -171,7 +195,7 @@ def main():
     df = read_cmapss_txt(data_path)
     feature_cols = json.loads(feats_path.read_text(encoding="utf-8"))
 
-    # If meta exists, prefer window/cap from meta (sanity)
+    # If meta exists, sanity check window/cap vs args
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         meta_w = int(meta.get("window", args.window))
@@ -196,7 +220,7 @@ def main():
     pred_raw = np.clip(pred, 0, None)
     pred_cap = np.clip(pred_raw, 0, int(args.cap))
 
-    # prediction intervals (RF only) -> compute on raw, then clip into raw/cap
+    # prediction intervals (RF only)
     pi_low, pi_med, pi_high = rf_prediction_interval(model, X, low=float(args.pi_low), high=float(args.pi_high))
     has_pi = pi_low is not None
 
@@ -209,30 +233,39 @@ def main():
         pi_med_cap = np.clip(pi_med_raw, 0, int(args.cap))
         pi_high_cap = np.clip(pi_high_raw, 0, int(args.cap))
 
-    # traffic-light status from capped prediction
+    # traffic-light status
     status = np.array([rul_status(float(v), red_thr=args.red_thr, yellow_thr=args.yellow_thr) for v in pred_cap])
 
-    out_df = pd.DataFrame(
-        {
-            "unit_id": feat_df["unit_id"].values,
-            "pred_rul_raw": pred_raw,
-            "pred_rul_cap": pred_cap,
-            "status": status,
-        }
-    ).sort_values("unit_id").reset_index(drop=True)
+    out_df = (
+        pd.DataFrame(
+            {
+                "unit_id": feat_df["unit_id"].values,
+                "pred_rul_raw": pred_raw,
+                "pred_rul_cap": pred_cap,
+                "status": status,
+            }
+        )
+        .sort_values("unit_id")
+        .reset_index(drop=True)
+    )
+
+    low_lbl = _pct_col_label(args.pi_low)
+    high_lbl = _pct_col_label(args.pi_high)
+    low_name = f"pi_p{low_lbl}_cap"
+    high_name = f"pi_p{high_lbl}_cap"
 
     if has_pi:
-        low_name = f"pi_p{int(args.pi_low)}_cap"
-        high_name = f"pi_p{int(args.pi_high)}_cap"
-
         out_df[low_name] = pi_low_cap
         out_df["pi_p50_cap"] = pi_med_cap
         out_df[high_name] = pi_high_cap
 
         # uncertainty width + normalized risk score (0..1)
-        out_df["pi_width_cap"] = (out_df[high_name] - out_df[low_name]).round(3)
-        out_df["risk_score"] = ((out_df["pi_width_cap"] / float(args.cap)).clip(0, 1)).round(3)
+        out_df["pi_width_cap"] = (out_df[high_name] - out_df[low_name]).clip(lower=0).round(3)
+        out_df["risk_score"] = (out_df["pi_width_cap"] / float(args.cap)).clip(0, 1).round(3)
     else:
+        out_df[low_name] = np.nan
+        out_df["pi_p50_cap"] = np.nan
+        out_df[high_name] = np.nan
         out_df["pi_width_cap"] = np.nan
         out_df["risk_score"] = np.nan
 
@@ -242,38 +275,58 @@ def main():
         except Exception:
             return str(p)
 
+    # -----------------------------
+    # Print header + table
+    # -----------------------------
     print("FD    :", fd)
     print("Model :", _pretty_path(model_path))
     print("Data  :", _pretty_path(data_path))
     print("Window:", int(args.window), "| CAP:", int(args.cap))
     print("Status thresholds:", f"RED<={args.red_thr}, YELLOW<={args.yellow_thr}, else GREEN")
     if has_pi:
-        print("Prediction interval:", f"p{args.pi_low:.0f}/p50/p{args.pi_high:.0f} (RF trees, clipped to CAP)")
+        print("Prediction interval:", f"p{args.pi_low:g}/p50/p{args.pi_high:g} (RF trees, clipped to CAP)")
     else:
         print("Prediction interval: n/a (model has no estimators_)")
+
+    # quick summary
+    counts = out_df["status"].value_counts().to_dict()
+    print("Summary:", f"n_units={len(out_df)} | RED={counts.get('RED', 0)}, YELLOW={counts.get('YELLOW', 0)}, GREEN={counts.get('GREEN', 0)}")
     print()
+
     print(out_df.to_string(index=False))
 
-    # TOP-10 critical units (only makes sense in batch mode)
+    # -----------------------------
+    # TOP-K critical (batch mode)
+    # -----------------------------
     if args.unit_id is None and len(out_df) > 1:
         severity_rank = {"RED": 0, "YELLOW": 1, "GREEN": 2}
 
         crit = out_df.copy()
         crit["severity"] = crit["status"].map(severity_rank).fillna(99).astype(int)
 
-        # Sort: RED first, then higher risk_score, then smaller predicted RUL
-        crit = crit.sort_values(
-            by=["severity", "risk_score", "pred_rul_cap"],
-            ascending=[True, False, True],
-        ).head(10)
+        # If no PI, risk_score is NaN -> treat as 0 for sorting
+        crit["_risk_for_sort"] = crit["risk_score"].fillna(0.0)
+
+        # Sort: worst status first, then higher uncertainty, then lower RUL
+        crit = (
+            crit.sort_values(
+                by=["severity", "_risk_for_sort", "pred_rul_cap"],
+                ascending=[True, False, True],
+            )
+            .head(args.topk)
+            .drop(columns=["_risk_for_sort"])
+        )
 
         cols = ["unit_id", "status", "pred_rul_cap"]
         if has_pi:
             cols += ["pi_width_cap", "risk_score"]
 
-        print("\nTOP-10 critical units (by status + uncertainty + low RUL):")
+        print(f"\nTOP-{args.topk} critical units (by status + uncertainty + low RUL):")
         print(crit[cols].to_string(index=False))
 
+    # -----------------------------
+    # Save
+    # -----------------------------
     if args.out:
         out_path = (root / args.out).resolve() if not Path(args.out).is_absolute() else Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
