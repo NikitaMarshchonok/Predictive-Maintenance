@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import joblib
 
+
 def rf_prediction_interval(model, X, low=10, high=90):
     """
     Prediction interval for RandomForest via per-tree predictions.
@@ -18,8 +19,8 @@ def rf_prediction_interval(model, X, low=10, high=90):
     preds = np.column_stack([est.predict(X) for est in model.estimators_])
 
     p_low = np.percentile(preds, low, axis=1)
-    p50   = np.percentile(preds, 50, axis=1)
-    p_high= np.percentile(preds, high, axis=1)
+    p50 = np.percentile(preds, 50, axis=1)
+    p_high = np.percentile(preds, high, axis=1)
     return p_low, p50, p_high
 
 
@@ -119,16 +120,32 @@ def main():
     parser.add_argument("--window", type=int, default=30)
     parser.add_argument("--cap", type=int, default=125)
 
-    parser.add_argument("--data", type=str, default=None, help="Path to test_FD00X.txt. If omitted, auto path is used.")
-    parser.add_argument("--models-dir", type=str, default="models", help="Models directory (default: models/)")
+    parser.add_argument("--data", type=str, default=None,
+                        help="Path to test_FD00X.txt. If omitted, auto path is used.")
+    parser.add_argument("--models-dir", type=str, default="models",
+                        help="Models directory (default: models/)")
 
     parser.add_argument("--unit-id", type=int, default=None, help="If set, predict only this unit_id")
     parser.add_argument("--out", type=str, default=None, help="Optional CSV output path for predictions (all units)")
+
+    # NEW: prediction interval + status thresholds
+    parser.add_argument("--pi-low", type=float, default=10.0,
+                        help="Prediction interval lower percentile (RF only)")
+    parser.add_argument("--pi-high", type=float, default=90.0,
+                        help="Prediction interval upper percentile (RF only)")
+    parser.add_argument("--red-thr", type=float, default=20.0,
+                        help="RED threshold for CAP RUL")
+    parser.add_argument("--yellow-thr", type=float, default=50.0,
+                        help="YELLOW threshold for CAP RUL")
+
     args = parser.parse_args()
 
     fd = args.fd.upper()
     if fd not in {"FD001", "FD002", "FD003", "FD004"}:
         raise ValueError("fd must be one of: FD001, FD002, FD003, FD004")
+
+    if args.pi_high <= args.pi_low:
+        raise ValueError("--pi-high must be greater than --pi-low (e.g., 90 > 10)")
 
     root = Path(__file__).resolve().parents[1]
     data_dir = root / "data" / "raw" / "cmapss" / "CMAPSSData"
@@ -138,7 +155,7 @@ def main():
 
     model_path = models_dir / f"{tag}.joblib"
     feats_path = models_dir / f"{tag}_features.json"
-    meta_path  = models_dir / f"{tag}_meta.json"
+    meta_path = models_dir / f"{tag}_meta.json"
 
     if args.data is None:
         data_path = data_dir / f"test_{fd}.txt"
@@ -181,16 +198,51 @@ def main():
     pred_raw = np.clip(pred, 0, None)
     pred_cap = np.clip(pred_raw, 0, int(args.cap))
 
+    # NEW: prediction intervals (RF only) -> compute on raw, then clip into raw/cap
+    pi_low, pi_med, pi_high = rf_prediction_interval(model, X, low=float(args.pi_low), high=float(args.pi_high))
+    has_pi = pi_low is not None
+
+    if has_pi:
+        pi_low_raw = np.clip(pi_low, 0, None)
+        pi_med_raw = np.clip(pi_med, 0, None)
+        pi_high_raw = np.clip(pi_high, 0, None)
+
+        pi_low_cap = np.clip(pi_low_raw, 0, int(args.cap))
+        pi_med_cap = np.clip(pi_med_raw, 0, int(args.cap))
+        pi_high_cap = np.clip(pi_high_raw, 0, int(args.cap))
+
+    # NEW: traffic-light status from capped prediction
+    status = np.array([rul_status(float(v), red_thr=args.red_thr, yellow_thr=args.yellow_thr) for v in pred_cap])
+
     out_df = pd.DataFrame({
         "unit_id": feat_df["unit_id"].values,
         "pred_rul_raw": pred_raw,
         "pred_rul_cap": pred_cap,
+        "status": status,
     }).sort_values("unit_id").reset_index(drop=True)
 
+    if has_pi:
+        low_name = f"pi_p{int(args.pi_low)}_cap"
+        high_name = f"pi_p{int(args.pi_high)}_cap"
+        out_df[low_name] = pi_low_cap
+        out_df["pi_p50_cap"] = pi_med_cap
+        out_df[high_name] = pi_high_cap
+
+    def _pretty_path(p: Path) -> str:
+        try:
+            return str(p.relative_to(root))
+        except Exception:
+            return str(p)
+
     print("FD    :", fd)
-    print("Model :", model_path.relative_to(root))
-    print("Data  :", data_path.relative_to(root) if data_path.is_relative_to(root) else data_path)
+    print("Model :", _pretty_path(model_path))
+    print("Data  :", _pretty_path(data_path))
     print("Window:", int(args.window), "| CAP:", int(args.cap))
+    print("Status thresholds:", f"RED<={args.red_thr}, YELLOW<={args.yellow_thr}, else GREEN")
+    if has_pi:
+        print("Prediction interval:", f"p{args.pi_low:.0f}/p50/p{args.pi_high:.0f} (RF trees, clipped to CAP)")
+    else:
+        print("Prediction interval: n/a (model has no estimators_)")
     print()
     print(out_df.to_string(index=False))
 
