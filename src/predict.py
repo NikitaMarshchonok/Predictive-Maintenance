@@ -120,23 +120,22 @@ def main():
     parser.add_argument("--window", type=int, default=30)
     parser.add_argument("--cap", type=int, default=125)
 
-    parser.add_argument("--data", type=str, default=None,
-                        help="Path to test_FD00X.txt. If omitted, auto path is used.")
-    parser.add_argument("--models-dir", type=str, default="models",
-                        help="Models directory (default: models/)")
+    parser.add_argument(
+        "--data",
+        type=str,
+        default=None,
+        help="Path to test_FD00X.txt. If omitted, auto path is used.",
+    )
+    parser.add_argument("--models-dir", type=str, default="models", help="Models directory (default: models/)")
 
     parser.add_argument("--unit-id", type=int, default=None, help="If set, predict only this unit_id")
     parser.add_argument("--out", type=str, default=None, help="Optional CSV output path for predictions (all units)")
 
-    # NEW: prediction interval + status thresholds
-    parser.add_argument("--pi-low", type=float, default=10.0,
-                        help="Prediction interval lower percentile (RF only)")
-    parser.add_argument("--pi-high", type=float, default=90.0,
-                        help="Prediction interval upper percentile (RF only)")
-    parser.add_argument("--red-thr", type=float, default=20.0,
-                        help="RED threshold for CAP RUL")
-    parser.add_argument("--yellow-thr", type=float, default=50.0,
-                        help="YELLOW threshold for CAP RUL")
+    # prediction interval + status thresholds
+    parser.add_argument("--pi-low", type=float, default=10.0, help="Prediction interval lower percentile (RF only)")
+    parser.add_argument("--pi-high", type=float, default=90.0, help="Prediction interval upper percentile (RF only)")
+    parser.add_argument("--red-thr", type=float, default=20.0, help="RED threshold for CAP RUL")
+    parser.add_argument("--yellow-thr", type=float, default=50.0, help="YELLOW threshold for CAP RUL")
 
     args = parser.parse_args()
 
@@ -170,7 +169,6 @@ def main():
         raise FileNotFoundError(f"Data not found: {data_path}")
 
     df = read_cmapss_txt(data_path)
-
     feature_cols = json.loads(feats_path.read_text(encoding="utf-8"))
 
     # If meta exists, prefer window/cap from meta (sanity)
@@ -198,7 +196,7 @@ def main():
     pred_raw = np.clip(pred, 0, None)
     pred_cap = np.clip(pred_raw, 0, int(args.cap))
 
-    # NEW: prediction intervals (RF only) -> compute on raw, then clip into raw/cap
+    # prediction intervals (RF only) -> compute on raw, then clip into raw/cap
     pi_low, pi_med, pi_high = rf_prediction_interval(model, X, low=float(args.pi_low), high=float(args.pi_high))
     has_pi = pi_low is not None
 
@@ -211,22 +209,32 @@ def main():
         pi_med_cap = np.clip(pi_med_raw, 0, int(args.cap))
         pi_high_cap = np.clip(pi_high_raw, 0, int(args.cap))
 
-    # NEW: traffic-light status from capped prediction
+    # traffic-light status from capped prediction
     status = np.array([rul_status(float(v), red_thr=args.red_thr, yellow_thr=args.yellow_thr) for v in pred_cap])
 
-    out_df = pd.DataFrame({
-        "unit_id": feat_df["unit_id"].values,
-        "pred_rul_raw": pred_raw,
-        "pred_rul_cap": pred_cap,
-        "status": status,
-    }).sort_values("unit_id").reset_index(drop=True)
+    out_df = pd.DataFrame(
+        {
+            "unit_id": feat_df["unit_id"].values,
+            "pred_rul_raw": pred_raw,
+            "pred_rul_cap": pred_cap,
+            "status": status,
+        }
+    ).sort_values("unit_id").reset_index(drop=True)
 
     if has_pi:
         low_name = f"pi_p{int(args.pi_low)}_cap"
         high_name = f"pi_p{int(args.pi_high)}_cap"
+
         out_df[low_name] = pi_low_cap
         out_df["pi_p50_cap"] = pi_med_cap
         out_df[high_name] = pi_high_cap
+
+        # uncertainty width + normalized risk score (0..1)
+        out_df["pi_width_cap"] = (out_df[high_name] - out_df[low_name]).round(3)
+        out_df["risk_score"] = ((out_df["pi_width_cap"] / float(args.cap)).clip(0, 1)).round(3)
+    else:
+        out_df["pi_width_cap"] = np.nan
+        out_df["risk_score"] = np.nan
 
     def _pretty_path(p: Path) -> str:
         try:
@@ -245,6 +253,26 @@ def main():
         print("Prediction interval: n/a (model has no estimators_)")
     print()
     print(out_df.to_string(index=False))
+
+    # TOP-10 critical units (only makes sense in batch mode)
+    if args.unit_id is None and len(out_df) > 1:
+        severity_rank = {"RED": 0, "YELLOW": 1, "GREEN": 2}
+
+        crit = out_df.copy()
+        crit["severity"] = crit["status"].map(severity_rank).fillna(99).astype(int)
+
+        # Sort: RED first, then higher risk_score, then smaller predicted RUL
+        crit = crit.sort_values(
+            by=["severity", "risk_score", "pred_rul_cap"],
+            ascending=[True, False, True],
+        ).head(10)
+
+        cols = ["unit_id", "status", "pred_rul_cap"]
+        if has_pi:
+            cols += ["pi_width_cap", "risk_score"]
+
+        print("\nTOP-10 critical units (by status + uncertainty + low RUL):")
+        print(crit[cols].to_string(index=False))
 
     if args.out:
         out_path = (root / args.out).resolve() if not Path(args.out).is_absolute() else Path(args.out)
