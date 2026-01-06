@@ -211,5 +211,5 @@ def main():
         print(f"False GREEN count (safe): {len(false_green_s)}")
 
 
-if __name__ == "__main__":
+if __name__ == "__main__"
     main()
