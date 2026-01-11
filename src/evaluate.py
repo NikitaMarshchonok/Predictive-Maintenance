@@ -5,8 +5,11 @@ import numpy as np
 import pandas as pd
 
 
+# =========================
+# Status helpers
+# =========================
+
 def rul_status(rul_cap_value: float, red_thr: float = 20.0, yellow_thr: float = 50.0) -> str:
-    """Map capped RUL value to traffic-light status."""
     if rul_cap_value <= red_thr:
         return "RED"
     if rul_cap_value <= yellow_thr:
@@ -14,12 +17,18 @@ def rul_status(rul_cap_value: float, red_thr: float = 20.0, yellow_thr: float = 
     return "GREEN"
 
 
-def select_pi_col(df: pd.DataFrame, prefer_p: int | None = None) -> str | None:
-    """
-    Select PI-low column.
+_STATUS_SEVERITY = {"GREEN": 0, "YELLOW": 1, "RED": 2}
 
-    - If prefer_p is provided (e.g., 10), return pi_p10_cap if it exists.
-    - Otherwise fallback to the smallest available percentile (most conservative).
+
+def worst_status(a: str, b: str) -> str:
+    """Return more severe status among a,b."""
+    return a if _STATUS_SEVERITY.get(a, 0) >= _STATUS_SEVERITY.get(b, 0) else b
+
+
+def find_pi_low_col(df: pd.DataFrame) -> str | None:
+    """
+    Find lowest-percentile PI column like pi_p10_cap / pi_p5_cap.
+    Returns the column name with smallest p.
     """
     cols: list[tuple[int, str]] = []
     for c in df.columns:
@@ -30,18 +39,15 @@ def select_pi_col(df: pd.DataFrame, prefer_p: int | None = None) -> str | None:
                 cols.append((p, c))
             except Exception:
                 pass
-
     if not cols:
         return None
-
-    if prefer_p is not None:
-        for p, c in cols:
-            if p == prefer_p:
-                return c
-
     cols.sort(key=lambda x: x[0])
     return cols[0][1]
 
+
+# =========================
+# Data loaders
+# =========================
 
 def load_gt_rul(gt_path: Path, cap: int) -> pd.DataFrame:
     """
@@ -49,49 +55,84 @@ def load_gt_rul(gt_path: Path, cap: int) -> pd.DataFrame:
     """
     y = pd.read_csv(gt_path, header=None).iloc[:, 0].astype(float).to_numpy()
     unit_id = np.arange(1, len(y) + 1, dtype=int)
-
     true_rul_raw = np.clip(y, 0, None)
     true_rul_cap = np.clip(true_rul_raw, 0, cap)
-
     return pd.DataFrame({"unit_id": unit_id, "true_rul_cap": true_rul_cap})
 
 
-def confusion_df(y_true: pd.Series, y_pred: pd.Series) -> pd.DataFrame:
-    return pd.crosstab(y_true, y_pred, rownames=["true_status"], colnames=["pred_status"])
+def confusion_df(y_true: pd.Series, y_pred: pd.Series, pred_name: str = "pred_status") -> pd.DataFrame:
+    return pd.crosstab(y_true, y_pred, rownames=["true_status"], colnames=[pred_name])
 
+
+# =========================
+# Metrics
+# =========================
+
+def mae_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float]:
+    mae = float(np.mean(np.abs(y_pred - y_true)))
+    rmse = float(np.sqrt(np.mean((y_pred - y_true) ** 2)))
+    return mae, rmse
+
+
+def status_metrics(df: pd.DataFrame, pred_status_col: str) -> dict:
+    """
+    Returns:
+      - status_accuracy
+      - false_green_count / rate (dangerous misses)
+      - red_recall (RED predicted as RED)
+      - red_caught_rate (true RED predicted as RED or YELLOW; i.e., NOT GREEN)
+    """
+    y_true = df["true_status"]
+    y_pred = df[pred_status_col]
+
+    acc = float((y_true == y_pred).mean())
+
+    false_green = df[(df["true_status"] != "GREEN") & (df[pred_status_col] == "GREEN")]
+    false_green_count = int(len(false_green))
+    false_green_rate = float(false_green_count / max(len(df), 1))
+
+    # True RED rows
+    red_rows = df[df["true_status"] == "RED"]
+    if len(red_rows) == 0:
+        red_recall = 0.0
+        red_caught_rate = 0.0
+    else:
+        red_recall = float((red_rows[pred_status_col] == "RED").mean())
+        red_caught_rate = float((red_rows[pred_status_col] != "GREEN").mean())
+
+    return {
+        "status_accuracy": acc,
+        "false_green_count": false_green_count,
+        "false_green_rate": false_green_rate,
+        "red_recall": red_recall,
+        "red_caught_rate": red_caught_rate,
+    }
+
+
+def print_status_block(title: str, df: pd.DataFrame, pred_col: str, pred_label: str):
+    m = status_metrics(df, pred_col)
+    print(f"\n--- {title} ---")
+    print(f"Status accuracy: {m['status_accuracy']:.3f}")
+    print(f"False GREEN count: {m['false_green_count']} (rate={m['false_green_rate']:.3f})")
+    print(f"RED recall (pred=RED | true=RED): {m['red_recall']:.3f}")
+    print(f"RED caught rate (pred!=GREEN | true=RED): {m['red_caught_rate']:.3f}")
+    print(f"Confusion (rows=true, cols={pred_label}):")
+    print(confusion_df(df["true_status"], df[pred_col], pred_name=pred_label).to_string())
+
+
+# =========================
+# Main
+# =========================
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate CMAPSS predictions vs ground truth RUL.")
     parser.add_argument("--fd", type=str, required=True, help="FD001/FD002/FD003/FD004")
     parser.add_argument("--cap", type=int, default=125)
     parser.add_argument("--pred", type=str, required=True, help="Path to preds CSV from src.predict")
-    parser.add_argument(
-        "--data-dir",
-        type=str,
-        default=None,
-        help="Override data dir (root/data/raw/cmapss/CMAPSSData)",
-    )
+    parser.add_argument("--data-dir", type=str, default=None, help="Override data dir (root/data/raw/cmapss/CMAPSSData)")
     parser.add_argument("--red-thr", type=float, default=20.0)
     parser.add_argument("--yellow-thr", type=float, default=50.0)
-
-    parser.add_argument(
-        "--use-pi-low",
-        action="store_true",
-        help="Also compute conservative status from PI low bound and SAFE gated status",
-    )
-    parser.add_argument(
-        "--pi-low-p",
-        type=int,
-        default=None,
-        help="Which PI-low percentile to use (e.g., 10 -> pi_p10_cap). If not set, uses smallest available.",
-    )
-    parser.add_argument(
-        "--gate-yellow-thr",
-        type=float,
-        default=None,
-        help="Threshold for downgrading GREEN using PI-low (defaults to --yellow-thr).",
-    )
-
+    parser.add_argument("--use-pi-low", action="store_true", help="Also compute conservative + SAFE-gated status from PI low bound")
     args = parser.parse_args()
 
     fd = args.fd.upper()
@@ -123,17 +164,14 @@ def main():
     if df.empty:
         raise ValueError("No matching unit_id between GT and pred file")
 
-    # statuses (point prediction)
+    # Base statuses from point estimate
     df["true_status"] = df["true_rul_cap"].apply(lambda v: rul_status(v, args.red_thr, args.yellow_thr))
     df["pred_status"] = df["pred_rul_cap"].apply(lambda v: rul_status(v, args.red_thr, args.yellow_thr))
 
-    # metrics
-    y_true = df["true_rul_cap"].to_numpy()
-    y_pred = df["pred_rul_cap"].to_numpy()
-
-    mae = float(np.mean(np.abs(y_pred - y_true)))
-    rmse = float(np.sqrt(np.mean((y_pred - y_true) ** 2)))
-    acc = float((df["pred_status"] == df["true_status"]).mean())
+    # Regression metrics
+    y_true = df["true_rul_cap"].to_numpy(dtype=float)
+    y_pred = df["pred_rul_cap"].to_numpy(dtype=float)
+    mae, rmse = mae_rmse(y_true, y_pred)
 
     print(f"FD: {fd} | CAP: {args.cap}")
     print(f"Pred: {pred_path}")
@@ -141,74 +179,46 @@ def main():
     print()
     print(f"MAE  : {mae:.3f}")
     print(f"RMSE : {rmse:.3f}")
-    print(f"Status accuracy (RED/YELLOW/GREEN): {acc:.3f}")
-    print()
 
-    conf = confusion_df(df["true_status"], df["pred_status"])
-    print("Confusion (rows=true, cols=pred):")
-    print(conf.to_string())
-    print()
+    # Point status block
+    print_status_block("Point status (from pred_rul_cap)", df, "pred_status", "pred_status")
 
-    # worst errors
+    # Worst errors table
     df["abs_err"] = (df["pred_rul_cap"] - df["true_rul_cap"]).abs()
     worst = df.sort_values("abs_err", ascending=False).head(10)[
         ["unit_id", "true_rul_cap", "pred_rul_cap", "abs_err", "true_status", "pred_status"]
     ]
-    print("Top-10 worst errors:")
+    print("\nTop-10 worst errors:")
     print(worst.to_string(index=False))
 
-    # safety focus: false GREEN count
-    false_green = df[(df["true_status"] != "GREEN") & (df["pred_status"] == "GREEN")]
-    print()
-    print(f"False GREEN count (dangerous misses): {len(false_green)}")
-
-    # PI-low conservative + SAFE-gated
+    # PI-low modes
     if args.use_pi_low:
-        pi_low_col = select_pi_col(df, prefer_p=args.pi_low_p)
+        pi_low_col = find_pi_low_col(df)
         if pi_low_col is None:
-            print("\n[info] --use-pi-low set but no PI columns found (pi_pXX_cap). Skipping conservative status.")
+            print("\n[info] --use-pi-low set but no PI columns found (pi_pXX_cap). Skipping PI-based statuses.")
             return
 
-        # 1) Pure conservative status from PI low
+        # 1) Conservative status: status only from PI-low
         df["pred_status_conservative"] = df[pi_low_col].apply(lambda v: rul_status(v, args.red_thr, args.yellow_thr))
-        acc_c = float((df["pred_status_conservative"] == df["true_status"]).mean())
-        conf_c = confusion_df(df["true_status"], df["pred_status_conservative"])
-        false_green_c = df[(df["true_status"] != "GREEN") & (df["pred_status_conservative"] == "GREEN")]
+        print_status_block(
+            f"Conservative status (from PI low: {pi_low_col})",
+            df,
+            "pred_status_conservative",
+            "pred_conservative",
+        )
 
-        print("\n--- Conservative status (from PI low bound) ---")
-        print(f"PI low column: {pi_low_col}")
-        print(f"Status accuracy (conservative): {acc_c:.3f}")
-        print("Confusion (rows=true, cols=pred_conservative):")
-        print(conf_c.to_string())
-        print(f"False GREEN count (conservative): {len(false_green_c)}")
-
-        # 2) SAFE gated: downgrade GREEN if PI low indicates risk
-        gate_yellow_thr = args.gate_yellow_thr if args.gate_yellow_thr is not None else args.yellow_thr
-
-        def safe_gate(point_status: str, pi_low_val: float) -> str:
-            # Gate ONLY GREEN predictions (tunable via --gate-yellow-thr)
-            if point_status == "GREEN":
-                if pi_low_val <= args.red_thr:
-                    return "RED"
-                if pi_low_val <= gate_yellow_thr:
-                    return "YELLOW"
-                return "GREEN"
-            return point_status
-
+        # 2) SAFE gated: final status is "worse" of point and PI-low statuses
+        #    => never allow GREEN if PI-low indicates YELLOW/RED risk.
         df["pred_status_safe"] = [
-            safe_gate(ps, pv) for ps, pv in zip(df["pred_status"].tolist(), df[pi_low_col].tolist())
+            worst_status(p, c) for p, c in zip(df["pred_status"].tolist(), df["pred_status_conservative"].tolist())
         ]
 
-        acc_s = float((df["pred_status_safe"] == df["true_status"]).mean())
-        conf_s = confusion_df(df["true_status"], df["pred_status_safe"])
-        false_green_s = df[(df["true_status"] != "GREEN") & (df["pred_status_safe"] == "GREEN")]
-
-        print("\n--- SAFE gated status (point + PI-low gate) ---")
-        print(f"PI low column: {pi_low_col} | gate_yellow_thr: {gate_yellow_thr}")
-        print(f"Status accuracy (safe): {acc_s:.3f}")
-        print("Confusion (rows=true, cols=pred_safe):")
-        print(conf_s.to_string())
-        print(f"False GREEN count (safe): {len(false_green_s)}")
+        print_status_block(
+            f"SAFE gated status (worst of point & PI-low={pi_low_col})",
+            df,
+            "pred_status_safe",
+            "pred_safe",
+        )
 
 
 if __name__ == "__main__":

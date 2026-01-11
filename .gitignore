@@ -70,3 +70,17 @@ reports/
 # Data
 data/raw/
 data/processed/
+
+
+# reports artifacts (usually large)
+reports/preds_*.csv
+reports/*.html
+reports/*.png
+
+# python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+venv/
+
