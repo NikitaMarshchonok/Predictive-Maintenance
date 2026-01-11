@@ -5,9 +5,6 @@ import numpy as np
 import pandas as pd
 
 
-_STATUS_SEVERITY = {"GREEN": 0, "YELLOW": 1, "RED": 2}
-
-
 def rul_status(rul_cap_value: float, red_thr: float, yellow_thr: float) -> str:
     if rul_cap_value <= red_thr:
         return "RED"
@@ -16,8 +13,9 @@ def rul_status(rul_cap_value: float, red_thr: float, yellow_thr: float) -> str:
     return "GREEN"
 
 
-def worst_status(a: str, b: str) -> str:
-    return a if _STATUS_SEVERITY.get(a, 0) >= _STATUS_SEVERITY.get(b, 0) else b
+def severity(s: str) -> int:
+    # worst = max(severity)
+    return {"GREEN": 0, "YELLOW": 1, "RED": 2}[s]
 
 
 def load_gt_rul(gt_path: Path, cap: int) -> pd.DataFrame:
@@ -28,57 +26,36 @@ def load_gt_rul(gt_path: Path, cap: int) -> pd.DataFrame:
     return pd.DataFrame({"unit_id": unit_id, "true_rul_cap": true_rul_cap})
 
 
-def find_pi_cols(df: pd.DataFrame) -> list[str]:
-    cols = []
-    for c in df.columns:
-        if c.startswith("pi_p") and c.endswith("_cap"):
-            cols.append(c)
-    return sorted(cols)
-
-
-def status_metrics(y_true: pd.Series, y_pred: pd.Series) -> dict:
-    acc = float((y_true == y_pred).mean())
-
-    false_green_mask = (y_true != "GREEN") & (y_pred == "GREEN")
-    false_green_count = int(false_green_mask.sum())
-    false_green_rate = float(false_green_count / max(len(y_true), 1))
-
-    red_mask = (y_true == "RED")
-    if int(red_mask.sum()) == 0:
-        red_recall = 0.0
-        red_caught_rate = 0.0
-    else:
-        red_recall = float((y_pred[red_mask] == "RED").mean())
-        red_caught_rate = float((y_pred[red_mask] != "GREEN").mean())
-
-    return {
-        "acc": acc,
-        "false_green_count": false_green_count,
-        "false_green_rate": false_green_rate,
-        "red_recall": red_recall,
-        "red_caught_rate": red_caught_rate,
-    }
-
-
 def main():
-    p = argparse.ArgumentParser(description="Grid search red/yellow thresholds for SAFE status.")
-    p.add_argument("--fd", required=True, type=str, help="FD001/FD002/FD003/FD004")
-    p.add_argument("--cap", default=125, type=int)
-    p.add_argument("--pred", required=True, type=str, help="Preds CSV path")
-    p.add_argument("--data-dir", default=None, type=str)
-    p.add_argument("--pi-col", default=None, type=str, help="Which PI low column to use (e.g., pi_p10_cap). If not set, tries to prefer pi_p10_cap then smallest p.")
-    p.add_argument("--red-min", default=5, type=int)
-    p.add_argument("--red-max", default=35, type=int)
-    p.add_argument("--red-step", default=1, type=int)
-    p.add_argument("--yellow-min", default=15, type=int)
-    p.add_argument("--yellow-max", default=90, type=int)
-    p.add_argument("--yellow-step", default=1, type=int)
-    p.add_argument("--topk", default=15, type=int)
-    args = p.parse_args()
+    parser = argparse.ArgumentParser(
+        description="Tune RED/YELLOW thresholds for SAFE status (worst of point & PI-low), with constraints."
+    )
+    parser.add_argument("--fd", type=str, required=True, help="FD001/FD002/FD003/FD004")
+    parser.add_argument("--cap", type=int, default=125)
+    parser.add_argument("--pred", type=str, required=True, help="Path to preds CSV from src.predict")
+    parser.add_argument("--data-dir", type=str, default=None, help="Override CMAPSSData dir path")
+    parser.add_argument("--pi-col", type=str, required=True, help="PI low column, e.g. pi_p10_cap")
+    parser.add_argument("--topk", type=int, default=20)
+
+    # search space
+    parser.add_argument("--red-min", type=int, default=10)
+    parser.add_argument("--red-max", type=int, default=60)
+    parser.add_argument("--yellow-max", type=int, default=125)
+
+    # constraints to avoid degenerate thresholds
+    parser.add_argument("--min-gap", type=int, default=10, help="Require yellow_thr - red_thr >= min_gap")
+    parser.add_argument(
+        "--min-yellow-rate",
+        type=float,
+        default=0.05,
+        help="Require share of TRUE YELLOW >= this value (prevents vanishing yellow zone)",
+    )
+
+    args = parser.parse_args()
 
     fd = args.fd.upper()
     if fd not in {"FD001", "FD002", "FD003", "FD004"}:
-        raise ValueError("fd must be one of FD001..FD004")
+        raise ValueError("fd must be one of: FD001, FD002, FD003, FD004")
 
     root = Path(__file__).resolve().parents[1]
     pred_path = (root / args.pred).resolve() if not Path(args.pred).is_absolute() else Path(args.pred)
@@ -89,84 +66,124 @@ def main():
         data_dir = (root / args.data_dir).resolve() if not Path(args.data_dir).is_absolute() else Path(args.data_dir)
 
     gt_path = data_dir / f"RUL_{fd}.txt"
+
     if not pred_path.exists():
         raise FileNotFoundError(f"Pred file not found: {pred_path}")
     if not gt_path.exists():
         raise FileNotFoundError(f"GT file not found: {gt_path}")
 
     pred_df = pd.read_csv(pred_path)
-    if "unit_id" not in pred_df.columns or "pred_rul_cap" not in pred_df.columns:
-        raise ValueError("Pred file must contain unit_id, pred_rul_cap")
+    needed = {"unit_id", "pred_rul_cap", args.pi_col}
+    missing = needed - set(pred_df.columns)
+    if missing:
+        raise ValueError(f"Pred file missing columns: {sorted(missing)}")
 
     gt_df = load_gt_rul(gt_path, cap=int(args.cap))
     df = gt_df.merge(pred_df, on="unit_id", how="inner")
     if df.empty:
-        raise ValueError("No matching unit_id between GT and pred")
+        raise ValueError("No matching unit_id between GT and pred file")
 
-    # pick PI column
-    pi_cols = find_pi_cols(df)
-    if args.pi_col:
-        if args.pi_col not in df.columns:
-            raise ValueError(f"--pi-col {args.pi_col} not found. Available: {pi_cols}")
-        pi_col = args.pi_col
-    else:
-        # Prefer pi_p10_cap if exists, else pick smallest percentile.
-        if "pi_p10_cap" in df.columns:
-            pi_col = "pi_p10_cap"
-        else:
-            # parse p number
-            parsed = []
-            for c in pi_cols:
-                try:
-                    pnum = int(c.replace("pi_p", "").replace("_cap", ""))
-                    parsed.append((pnum, c))
-                except Exception:
-                    pass
-            if not parsed:
-                raise ValueError(f"No PI columns found. Available cols: {list(df.columns)}")
-            parsed.sort(key=lambda x: x[0])
-            pi_col = parsed[0][1]
+    rows = []
 
-    # true statuses are always computed from true_rul_cap with same thresholds as the business policy
-    results = []
+    for red_thr in range(int(args.red_min), int(args.red_max) + 1):
+        yellow_start = red_thr + int(args.min_gap)
+        for yellow_thr in range(yellow_start, int(args.yellow_max) + 1):
+            # TRUE status (these thresholds define the business zones)
+            true_status = df["true_rul_cap"].apply(lambda v: rul_status(float(v), red_thr, yellow_thr))
 
-    red_values = list(range(args.red_min, args.red_max + 1, args.red_step))
-    yellow_values = list(range(args.yellow_min, args.yellow_max + 1, args.yellow_step))
-
-    for red_thr in red_values:
-        for yellow_thr in yellow_values:
-            if yellow_thr <= red_thr:
+            # constraint: YELLOW must exist in meaningful amount
+            yellow_rate = float((true_status == "YELLOW").mean())
+            if yellow_rate < float(args.min_yellow_rate):
                 continue
 
-            true_status = df["true_rul_cap"].apply(lambda v: rul_status(v, red_thr, yellow_thr))
-            point_status = df["pred_rul_cap"].apply(lambda v: rul_status(v, red_thr, yellow_thr))
-            pi_status = df[pi_col].apply(lambda v: rul_status(v, red_thr, yellow_thr))
+            # point status
+            point_status = df["pred_rul_cap"].apply(lambda v: rul_status(float(v), red_thr, yellow_thr))
 
-            # SAFE: worst of point & PI-low status
-            safe_status = [worst_status(a, b) for a, b in zip(point_status.tolist(), pi_status.tolist())]
+            # PI-low status
+            pi_status = df[args.pi_col].apply(lambda v: rul_status(float(v), red_thr, yellow_thr))
 
-            m_safe = status_metrics(true_status, pd.Series(safe_status))
-            # keep only safe solutions with zero false GREEN
-            if m_safe["false_green_count"] == 0:
-                results.append({
-                    "red_thr": red_thr,
-                    "yellow_thr": yellow_thr,
-                    "safe_acc": m_safe["acc"],
-                    "safe_red_recall": m_safe["red_recall"],
-                    "safe_red_caught": m_safe["red_caught_rate"],
-                    "pi_col": pi_col,
-                })
+            # SAFE = worst(point, pi_low) by severity
+            safe_status = [
+                "RED" if max(severity(ps), severity(pis)) == 2 else ("YELLOW" if max(severity(ps), severity(pis)) == 1 else "GREEN")
+                for ps, pis in zip(point_status.tolist(), pi_status.tolist())
+            ]
+            safe_status = pd.Series(safe_status, index=df.index)
 
-    if not results:
-        print(f"No thresholds found with False GREEN = 0 using {pi_col}. Try widening ranges.")
+            # key metrics
+            safe_acc = float((safe_status == true_status).mean())
+
+            false_green = int(((true_status != "GREEN") & (safe_status == "GREEN")).sum())
+            false_green_rate = false_green / float(len(df))
+
+            # red recall on true RED
+            true_red_mask = (true_status == "RED")
+            n_true_red = int(true_red_mask.sum())
+            if n_true_red > 0:
+                safe_red_recall = float(((safe_status == "RED") & true_red_mask).sum()) / n_true_red
+                safe_red_caught = float(((safe_status != "GREEN") & true_red_mask).sum()) / n_true_red
+            else:
+                safe_red_recall = 0.0
+                safe_red_caught = 0.0
+
+            # how noisy on true GREEN (unnecessary alarms)
+            true_green_mask = (true_status == "GREEN")
+            n_true_green = int(true_green_mask.sum())
+            if n_true_green > 0:
+                green_to_red_rate = float(((safe_status == "RED") & true_green_mask).sum()) / n_true_green
+                green_to_non_green_rate = float(((safe_status != "GREEN") & true_green_mask).sum()) / n_true_green
+            else:
+                green_to_red_rate = 0.0
+                green_to_non_green_rate = 0.0
+
+            # keep only safe solutions
+            if false_green == 0:
+                rows.append(
+                    {
+                        "red_thr": red_thr,
+                        "yellow_thr": yellow_thr,
+                        "min_gap": int(args.min_gap),
+                        "true_yellow_rate": yellow_rate,
+                        "safe_acc": safe_acc,
+                        "safe_red_recall": safe_red_recall,
+                        "safe_red_caught": safe_red_caught,
+                        "green_to_red_rate": green_to_red_rate,
+                        "green_to_non_green_rate": green_to_non_green_rate,
+                        "false_green_rate": false_green_rate,
+                        "pi_col": args.pi_col,
+                    }
+                )
+
+    print(f"FD: {fd} | CAP: {args.cap} | PI col: {args.pi_col}")
+    print(f"Pred: {pred_path}")
+    print(f"Constraints: min_gap={args.min_gap}, min_yellow_rate={args.min_yellow_rate}")
+    print()
+
+    if not rows:
+        print("No candidates found with False GREEN = 0 under given constraints.")
         return
 
-    out = pd.DataFrame(results).sort_values(["safe_acc", "safe_red_caught"], ascending=[False, False]).head(args.topk)
+    res = pd.DataFrame(rows)
 
-    print(f"FD: {fd} | CAP: {args.cap} | PI col: {pi_col}")
-    print(f"Pred: {pred_path}")
-    print("\nTop candidates (False GREEN = 0):")
-    print(out.to_string(index=False))
+    # Sort: best accuracy, then best catching RED, then less noise on GREEN
+    res = res.sort_values(
+        by=["safe_acc", "safe_red_caught", "safe_red_recall", "green_to_non_green_rate", "green_to_red_rate"],
+        ascending=[False, False, False, True, True],
+    )
+
+    cols = [
+        "red_thr",
+        "yellow_thr",
+        "safe_acc",
+        "safe_red_recall",
+        "safe_red_caught",
+        "true_yellow_rate",
+        "green_to_non_green_rate",
+        "green_to_red_rate",
+        "pi_col",
+    ]
+
+    print(f"Top candidates (False GREEN = 0):")
+    print(res[cols].head(int(args.topk)).to_string(index=False))
 
 
 if __name__ == "__main__":
