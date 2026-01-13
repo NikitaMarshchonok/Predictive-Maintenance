@@ -60,3 +60,17 @@ python -m src.predict --fd FD004 --unit-id 1
 python -m src.predict --fd FD002 --out reports/preds_fd002.csv
 ```
 
+
+Export predictions CSV:
+```
+python -m src.predict --fd FD002 --out reports/preds_fd002.csv
+
+```
+
+### 5) Evaluate (MAE/RMSE + status metrics)
+
+Basic:
+```
+    python -m src.evaluate --fd FD002 --cap 125 --pred reports/preds_fd002.csv
+```
+
