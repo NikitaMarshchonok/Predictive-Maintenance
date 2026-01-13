@@ -74,3 +74,20 @@ Basic:
     python -m src.evaluate --fd FD002 --cap 125 --pred reports/preds_fd002.csv
 ```
 
+## Status labels (RED / YELLOW / GREEN)
+
+    We convert predicted RUL to a simple health status:
+
+    RED: rul_cap <= red_thr
+
+    YELLOW: red_thr < rul_cap <= yellow_thr
+
+    GREEN: rul_cap > yellow_thr
+
+    Default thresholds:
+
+    red_thr = 20
+
+    yellow_thr = 50 
+
+    
