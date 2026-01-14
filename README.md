@@ -90,4 +90,21 @@ Basic:
 
     yellow_thr = 50 
 
-    
+
+
+## Safety layer (PI-low gating)
+
+    If your predictions file contains prediction interval columns like:
+        pi_p10_cap (10th percentile / lower bound)
+
+        pi_p5_cap (5th percentile / lower bound)
+
+    You can compute additional safety-oriented statuses:
+
+        Conservative status: status from PI-low only (very safe, more false alarms)
+
+        SAFE worst-of: worst status between point prediction & PI-low
+
+        SAFE gated (recommended): keep point status, but never allow GREEN if PI-low indicates risk
+
+
