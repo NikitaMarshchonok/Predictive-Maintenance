@@ -138,3 +138,14 @@ Searches best red_thr / yellow_thr for SAFE metrics:
       --pred reports/preds_fd002.csv --pi-col pi_p10_cap --topk 20
 ```
 
+## Tune PI gates (recommended)
+
+Keeps business thresholds fixed (e.g., 20/50) and searches gate thresholds:
+```
+python -m src.tune_gates --fd FD002 --cap 125 \
+  --pred reports/preds_fd002.csv \
+  --pi-col pi_p10_cap \
+  --base-red-thr 20 --base-yellow-thr 50 \
+  --max-false-green 1 --min-red-caught 0.98 \
+  --topk 30
+```
