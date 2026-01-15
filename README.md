@@ -108,3 +108,22 @@ Basic:
         SAFE gated (recommended): keep point status, but never allow GREEN if PI-low indicates risk
 
 
+Evaluate with PI-low (auto-detect lowest PI column)
+```
+      python -m src.evaluate --fd FD002 --cap 125 --pred reports/preds_fd002.csv --use-pi-low
+```
+
+
+Evaluate with explicit PI column + gating thresholds
+
+(keep business thresholds fixed, tune only the gate thresholds)
+
+```
+         python -m src.evaluate --fd FD002 --cap 125 \
+          --pred reports/preds_fd002.csv \
+          --red-thr 20 --yellow-thr 50 \
+          --use-pi-low --pi-col pi_p10_cap \
+          --gate-red-thr 10 --gate-yellow-thr 37
+
+```
+
