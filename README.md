@@ -149,3 +149,11 @@ python -m src.tune_gates --fd FD002 --cap 125 \
   --max-false-green 1 --min-red-caught 0.98 \
   --topk 30
 ```
+
+## Notes
+
+    data/ is kept out of git (large raw files).
+
+    PI columns are expected to be named like pi_p10_cap, pi_p5_cap, etc.
+
+    In maintenance settings, False GREEN (true RED/YELLOW predicted as GREEN) is the most dangerous error type.
