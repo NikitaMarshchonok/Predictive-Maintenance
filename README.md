@@ -127,3 +127,14 @@ Evaluate with explicit PI column + gating thresholds
 
 ```
 
+
+## Tuning (optional)
+
+Tune business thresholds (red/yellow)
+
+Searches best red_thr / yellow_thr for SAFE metrics:
+```
+      python -m src.tune_thresholds --fd FD002 --cap 125 \
+      --pred reports/preds_fd002.csv --pi-col pi_p10_cap --topk 20
+```
+
