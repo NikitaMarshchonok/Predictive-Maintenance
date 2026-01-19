@@ -31,3 +31,11 @@ models/*.joblib
 models/*.pkl
 reports/preds_*.csv
 reports/*.csv
+
+.venv/
+data/
+data/raw/cmapss/CMAPSSData/
+data/raw/cmapss/*.zip
+reports/preds*.csv
+__pycache__/
+*.pyc
