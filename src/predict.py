@@ -2,22 +2,37 @@ import argparse
 import json
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
-import joblib
 
 
+# =========================================================
+# Safety / status helpers
+# =========================================================
 
 def rul_status(rul_cap_value: float, red_thr: float = 20.0, yellow_thr: float = 50.0) -> str:
     """Map RUL(cap) -> traffic-light status."""
-    if rul_cap_value <= red_thr:
+    v = float(rul_cap_value)
+    if v <= float(red_thr):
         return "RED"
-    if rul_cap_value <= yellow_thr:
+    if v <= float(yellow_thr):
         return "YELLOW"
     return "GREEN"
 
 
-def find_pi_low_col(df) -> str | None:
+def status_severity(s: str) -> int:
+    """Lower is worse."""
+    m = {"RED": 0, "YELLOW": 1, "GREEN": 2}
+    return m.get(str(s), 99)
+
+
+def worst_status(a: str, b: str) -> str:
+    """Return more conservative (worse) status."""
+    return a if status_severity(a) <= status_severity(b) else b
+
+
+def find_pi_low_col(df: pd.DataFrame) -> str | None:
     """
     Find lowest-percentile PI column like pi_p10_cap / pi_p5_cap.
     Returns the column name with smallest p.
@@ -36,28 +51,31 @@ def find_pi_low_col(df) -> str | None:
     return cols[0][1]
 
 
-def safe_gate_status(point_status: str, pi_low_val: float, gate_red: float, gate_yellow: float) -> str:
+def safe_gate_status(point_status: str, pi_low_val: float, gate_red_thr: float, gate_yellow_thr: float) -> str:
     """
-    SAFE gate policy:
-    - If point says GREEN, we downgrade if PI-low indicates risk.
-    - Optional: if point says YELLOW and PI-low is RED, escalate to RED.
+    SAFE gated policy:
+    - If point is GREEN, forbid GREEN if PI-low indicates risk (using gate thresholds).
+    - Optional: if point is YELLOW but PI-low is strongly RED (<= gate_red_thr), escalate to RED.
+    - RED stays RED.
     """
-    if point_status == "GREEN":
-        if pi_low_val <= gate_red:
+    ps = str(point_status)
+    pv = float(pi_low_val)
+
+    if ps == "GREEN":
+        if pv <= float(gate_red_thr):
             return "RED"
-        if pi_low_val <= gate_yellow:
+        if pv <= float(gate_yellow_thr):
             return "YELLOW"
         return "GREEN"
 
-    if point_status == "YELLOW" and pi_low_val <= gate_red:
+    if ps == "YELLOW" and pv <= float(gate_red_thr):
         return "RED"
 
-    return point_status
-
+    return ps
 
 
 # =========================================================
-# Helpers
+# Model helpers
 # =========================================================
 
 def rf_prediction_interval(model, X, low=10, high=90):
@@ -73,79 +91,6 @@ def rf_prediction_interval(model, X, low=10, high=90):
     p50 = np.percentile(preds, 50, axis=1)
     p_high = np.percentile(preds, high, axis=1)
     return p_low, p50, p_high
-
-
-def rul_status(rul_cap_value, red_thr=20.0, yellow_thr=50.0):
-    """
-    Simple traffic-light status based on capped RUL.
-    """
-    if float(rul_cap_value) <= float(red_thr):
-        return "RED"
-    if float(rul_cap_value) <= float(yellow_thr):
-        return "YELLOW"
-    return "GREEN"
-
-
-def status_severity(s: str) -> int:
-    """
-    Lower is worse.
-    """
-    m = {"RED": 0, "YELLOW": 1, "GREEN": 2}
-    return m.get(str(s), 99)
-
-
-def worst_status(a: str, b: str) -> str:
-    return a if status_severity(a) <= status_severity(b) else b
-
-
-def find_pi_low_col(df: pd.DataFrame) -> str | None:
-    """
-    Find lowest-percentile PI column like pi_p10_cap / pi_p5_cap.
-    Returns the column name with smallest p.
-    """
-    cols = []
-    for c in df.columns:
-        if c.startswith("pi_p") and c.endswith("_cap"):
-            # pi_p10_cap -> 10
-            try:
-                p = int(c.replace("pi_p", "").replace("_cap", ""))
-                cols.append((p, c))
-            except Exception:
-                pass
-    if not cols:
-        return None
-    cols.sort(key=lambda x: x[0])
-    return cols[0][1]
-
-
-def safe_gate_status(point_status: str, pi_low_val: float,
-                     gate_red_thr: float, gate_yellow_thr: float,
-                     base_red_thr: float, base_yellow_thr: float) -> str:
-    """
-    SAFE gated policy:
-    - If point is GREEN, forbid GREEN if PI-low indicates risk (using gate thresholds).
-    - Optional: if point is YELLOW but PI-low is strongly RED (<= gate_red_thr), escalate to RED.
-    - RED stays RED.
-
-    Note:
-    - base_* thresholds define how we label RED/YELLOW/GREEN normally.
-    - gate_* thresholds define when PI-low forces downgrade (usually <= base thresholds).
-    """
-    ps = str(point_status)
-
-    # If point says GREEN -> check PI-low gates
-    if ps == "GREEN":
-        if float(pi_low_val) <= float(gate_red_thr):
-            return "RED"
-        if float(pi_low_val) <= float(gate_yellow_thr):
-            return "YELLOW"
-        return "GREEN"
-
-    # Optional escalation: YELLOW -> RED if PI-low is very low
-    if ps == "YELLOW" and float(pi_low_val) <= float(gate_red_thr):
-        return "RED"
-
-    return ps
 
 
 def read_cmapss_txt(path: Path) -> pd.DataFrame:
@@ -253,18 +198,34 @@ def main():
     parser.add_argument("--yellow-thr", type=float, default=50.0, help="YELLOW threshold for CAP RUL")
 
     # Status policy (what goes into column `status`)
-    parser.add_argument("--status-policy", type=str, default="point",
-                        choices=["point", "conservative", "worst", "gate"],
-                        help="Which status to output in `status` column.")
+    parser.add_argument(
+        "--status-policy",
+        type=str,
+        default="point",
+        choices=["point", "conservative", "worst", "gate"],
+        help="Which status to output in `status` column."
+    )
 
     # PI column selection + gate thresholds
-    parser.add_argument("--pi-col", type=str, default=None,
-                        help="Which PI low column to use for conservative/worst/gate (e.g., pi_p10_cap). "
-                             "If not set, auto-detect lowest pi_pXX_cap.")
-    parser.add_argument("--gate-red-thr", type=float, default=10.0,
-                        help="Gate threshold for forcing RED when point is GREEN (uses PI-low).")
-    parser.add_argument("--gate-yellow-thr", type=float, default=37.0,
-                        help="Gate threshold for forcing YELLOW when point is GREEN (uses PI-low).")
+    parser.add_argument(
+        "--pi-col",
+        type=str,
+        default=None,
+        help="Which PI low column to use (e.g., pi_p10_cap). If not set, auto-detect lowest pi_pXX_cap."
+    )
+    # IMPORTANT: defaults tuned nicely for FD002 in your experiments
+    parser.add_argument(
+        "--gate-red-thr",
+        type=float,
+        default=8.0,
+        help="Gate threshold for forcing RED when point is GREEN (uses PI-low)."
+    )
+    parser.add_argument(
+        "--gate-yellow-thr",
+        type=float,
+        default=37.0,
+        help="Gate threshold for forcing YELLOW when point is GREEN (uses PI-low)."
+    )
 
     args = parser.parse_args()
 
@@ -341,6 +302,7 @@ def main():
     # Point status
     out_df["status_point"] = [rul_status(v, args.red_thr, args.yellow_thr) for v in out_df["pred_rul_cap"].tolist()]
 
+    # Add PI columns + safety statuses if PI exists
     if has_pi:
         pi_low_raw = np.clip(pi_low, 0, None)
         pi_med_raw = np.clip(pi_med, 0, None)
@@ -368,31 +330,22 @@ def main():
             # Fallback: use the generated low_name
             pi_col = low_name
 
-        # Conservative status from PI-low
         out_df["status_conservative"] = [
             rul_status(v, args.red_thr, args.yellow_thr) for v in out_df[pi_col].tolist()
         ]
 
-        # Worst-of (point vs PI-low)
         out_df["status_worst"] = [
             worst_status(a, b) for a, b in zip(out_df["status_point"].tolist(), out_df["status_conservative"].tolist())
         ]
 
-        # Gated
         out_df["status_gate"] = [
-            safe_gate_status(
-                point_status=ps,
-                pi_low_val=pv,
-                gate_red_thr=args.gate_red_thr,
-                gate_yellow_thr=args.gate_yellow_thr,
-                base_red_thr=args.red_thr,
-                base_yellow_thr=args.yellow_thr,
-            )
+            safe_gate_status(ps, pv, args.gate_red_thr, args.gate_yellow_thr)
             for ps, pv in zip(out_df["status_point"].tolist(), out_df[pi_col].tolist())
         ]
 
-        # Expose which PI column used
         out_df["pi_low_col_used"] = pi_col
+        out_df["gate_red_used"] = float(args.gate_red_thr)
+        out_df["gate_yellow_used"] = float(args.gate_yellow_thr)
 
     else:
         out_df["pi_width_cap"] = np.nan
@@ -401,6 +354,8 @@ def main():
         out_df["status_worst"] = np.nan
         out_df["status_gate"] = np.nan
         out_df["pi_low_col_used"] = np.nan
+        out_df["gate_red_used"] = np.nan
+        out_df["gate_yellow_used"] = np.nan
 
     # Set main status according to policy
     policy = args.status_policy
@@ -419,6 +374,7 @@ def main():
         except Exception:
             return str(p)
 
+    # Print summary header
     print("FD    :", fd)
     print("Model :", _pretty_path(model_path))
     print("Data  :", _pretty_path(data_path))
@@ -428,14 +384,19 @@ def main():
 
     if has_pi:
         print("Prediction interval:", f"p{args.pi_low:.0f}/p50/p{args.pi_high:.0f} (RF trees, clipped to CAP)")
-        pi_used = out_df["pi_low_col_used"].iloc[0]
-        print("PI-low used     :", pi_used)
+        print("PI-low used     :", out_df['pi_low_col_used'].iloc[0])
         print("Gate thresholds :", f"gate_red={args.gate_red_thr}, gate_yellow={args.gate_yellow_thr}")
     else:
         print("Prediction interval: n/a (model has no estimators_)")
 
     print()
-    print(out_df.to_string(index=False))
+
+    # Avoid printing huge tables unless single unit
+    if args.unit_id is not None or len(out_df) <= 50:
+        print(out_df.to_string(index=False))
+    else:
+        print(out_df.head(20).to_string(index=False))
+        print(f"\n[info] showing first 20/{len(out_df)} rows. Use --out to save full CSV.")
 
     # TOP-10 critical units (batch mode)
     if args.unit_id is None and len(out_df) > 1:
@@ -464,6 +425,7 @@ def main():
         print("\nTOP-10 critical units (by status + uncertainty + low RUL):")
         print(crit[cols].to_string(index=False))
 
+    # Save
     if args.out:
         out_path = (root / args.out).resolve() if not Path(args.out).is_absolute() else Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
