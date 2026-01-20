@@ -7,6 +7,55 @@ import pandas as pd
 import joblib
 
 
+
+def rul_status(rul_cap_value: float, red_thr: float = 20.0, yellow_thr: float = 50.0) -> str:
+    """Map RUL(cap) -> traffic-light status."""
+    if rul_cap_value <= red_thr:
+        return "RED"
+    if rul_cap_value <= yellow_thr:
+        return "YELLOW"
+    return "GREEN"
+
+
+def find_pi_low_col(df) -> str | None:
+    """
+    Find lowest-percentile PI column like pi_p10_cap / pi_p5_cap.
+    Returns the column name with smallest p.
+    """
+    cols = []
+    for c in df.columns:
+        if c.startswith("pi_p") and c.endswith("_cap"):
+            try:
+                p = int(c.replace("pi_p", "").replace("_cap", ""))
+                cols.append((p, c))
+            except Exception:
+                pass
+    if not cols:
+        return None
+    cols.sort(key=lambda x: x[0])
+    return cols[0][1]
+
+
+def safe_gate_status(point_status: str, pi_low_val: float, gate_red: float, gate_yellow: float) -> str:
+    """
+    SAFE gate policy:
+    - If point says GREEN, we downgrade if PI-low indicates risk.
+    - Optional: if point says YELLOW and PI-low is RED, escalate to RED.
+    """
+    if point_status == "GREEN":
+        if pi_low_val <= gate_red:
+            return "RED"
+        if pi_low_val <= gate_yellow:
+            return "YELLOW"
+        return "GREEN"
+
+    if point_status == "YELLOW" and pi_low_val <= gate_red:
+        return "RED"
+
+    return point_status
+
+
+
 # =========================================================
 # Helpers
 # =========================================================
