@@ -157,3 +157,24 @@ python -m src.tune_gates --fd FD002 --cap 125 \
     PI columns are expected to be named like pi_p10_cap, pi_p5_cap, etc.
 
     In maintenance settings, False GREEN (true RED/YELLOW predicted as GREEN) is the most dangerous error type.
+
+
+## Safety Mode (uncertainty-aware statuses)
+
+The model outputs a point estimate `pred_rul_cap` and a RandomForest prediction interval
+computed from per-tree predictions (`pi_p10_cap`, `pi_p50_cap`, `pi_p90_cap`).
+
+We support multiple status policies:
+
+- `point` — status from point prediction only (`pred_rul_cap`)
+- `conservative` — status from PI-low (e.g., `pi_p10_cap`) only
+- `worst` — worst of (`point`, `conservative`)  **(most conservative)**
+- `gate` — safety gate: if `point=GREEN`, downgrade to YELLOW/RED only when PI-low crosses `gate_*` thresholds
+
+### Example (FD002 recommended gates)
+```bash
+python -m src.predict --fd FD002 \
+  --status-policy gate --pi-col pi_p10_cap \
+  --gate-red-thr 8 --gate-yellow-thr 37 \
+  --out reports/preds_fd002_safe_gate.csv
+    
